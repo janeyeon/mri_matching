@@ -288,6 +288,56 @@ def plane_controller(
         [position_z, position_y, position_x],  # napari uses z, y, x order
         [normal_z, normal_y, normal_x]
     )
+    
+slice_count = 0  # 전역으로 선언
+
+@magicgui(call_button="Select This Slice Plane")
+def select_current_slice_plane():
+    global slice_count, volume
+    if volume is None or "MRI Volume" not in viewer.layers:
+        print("No volume loaded.")
+        return
+
+    position = viewer.layers["MRI Volume"].experimental_slicing_plane.get("position", None)
+    normal = viewer.layers["MRI Volume"].experimental_slicing_plane.get("normal", None)
+    if position is None or normal is None:
+        print("Slicing plane not set.")
+        return
+
+    try:
+        rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
+        plane_size = (int(SHAPE[1] * 1.2), int(SHAPE[0] * 1.2))
+        spacing = 1.0
+        sliced, slice_pts_3d = slice_volume_with_plane(
+            volume,
+            plane_center=position,
+            normal=rotated_normal,
+            plane_x=None,
+            plane_size=plane_size,
+            spacing=spacing,
+            in_plane_offset=(65, 0),
+            order=1
+        )
+
+        points_xyz_napari = slice_pts_3d
+        colors = sliced.flatten()
+
+        layer_name = f"Sliced Dots {slice_count}"
+        slice_count += 1
+
+        viewer.add_points(
+            points_xyz_napari,
+            name=layer_name,
+            size=1,
+            features={"intensity": colors},
+            face_color="intensity",
+            edge_width=0,
+            opacity=0.6,
+            blending="additive"
+        )
+        print(f"Added new slice layer: {layer_name}")
+    except Exception as e:
+        print(f"[Select slice] Failed to extract: {e}")
 
 
 # Main
@@ -296,5 +346,7 @@ if __name__ == "__main__":
     viewer = napari.Viewer()
     viewer.window.add_dock_widget(dicom_loader_gui, area="right")
     viewer.window.add_dock_widget(plane_controller, area="right")
+    viewer.window.add_dock_widget(select_current_slice_plane, area="right")
+
     viewer.dims.ndisplay = 3
     napari.run()
