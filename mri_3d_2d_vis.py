@@ -165,48 +165,56 @@ def get_plane_outline(position, plane_x, plane_y, width=SHAPE[0], height=SHAPE[1
 
 
 def slice_volume_with_plane(volume, plane_center, normal, plane_x=None, 
-                              plane_size=(256, 256), spacing=1.0, in_plane_offset=(0.0, 0.0)):
+                              plane_size=(256, 256), spacing=1.0, in_plane_offset=(0.0, 0.0), order=1):
     """
-    3D volume에서 주어진 평면 상의 2D 단면을 추출하는 함수.
-    
+    1) 3D 볼륨에서 평면을 잘라 2D 슬라이스 생성
+    2) 동시에, 그 슬라이스의 각 픽셀을 3D 좌표로 투영해 'Sliced Dots'형태로 시각화하기 위한 점들을 계산
+       => 이 과정을 한 번에 하므로, 3D 평면과 2D 슬라이스가 정확히 동일 축을 공유함.
+
     Parameters
     ----------
-    volume : np.ndarray
-        3D 볼륨 (Z, Y, X) 형태.
-    plane_center : array_like
-        평면의 중심 좌표 (z, y, x).
-    normal : array_like
-        평면의 법선 (z, y, x). (정규화되지 않은 벡터도 가능)
-    plane_x : array_like, optional
-        평면 상에서 x축으로 사용할 벡터. None이면 기본값 ([1,0,0] 또는 [0,1,0] 선택)를 사용.
-    plane_size : tuple of int, optional
-        단면 이미지의 (width, height) 픽셀 크기. 기본값 (256, 256).
-    spacing : float, optional
-        픽셀 사이의 물리적 간격 (확대/축소 인자).
-    in_plane_offset : tuple of float, optional
-        평면 내부에서의 (ox, oy) 추가 오프셋 (픽셀 단위).
-    
+    volume : (Z, Y, X)
+    plane_center : (z, y, x)
+        평면의 중심 좌표
+    normal : (z, y, x)
+        평면의 법선 벡터
+    plane_x : (z, y, x), optional
+        평면 상의 x축 방향. None이면 자동 결정.
+    plane_size : (width, height)
+        슬라이스 이미지 픽셀 크기
+    spacing : float
+        픽셀 사이 물리 간격
+    in_plane_offset : (ox, oy)
+        평면 내부에서 (plane_x, plane_y) 방향으로 추가 이동 (단위: 픽셀)
+    order : int
+        보간 차수(map_coordinates). 기본 1.
+
     Returns
     -------
-    slice_img : np.ndarray
-        추출된 2D 단면 이미지 (plane_size와 동일한 shape).
+    slice_img : 2D np.ndarray
+        shape = (height, width)
+    slice_points_3d : (N, 3) np.ndarray
+        각 픽셀에 해당하는 3D 좌표 (z, y, x)
     """
-    # 1) 법선 정규화
+
+    # 1) normal 정규화
     normal = np.array(normal, dtype=float)
     normal /= (np.linalg.norm(normal) + 1e-8)
-    
-    # 2) plane_x 결정 (없으면 기본값 선택)
+
+    # 2) plane_x 결정 (없으면 자동)
     if plane_x is None:
-        # normal과 거의 평행하지 않은 벡터 선택:
-        if not np.allclose(normal, [1, 0, 0], atol=1e-6):
-            v = np.array([1, 0, 0], dtype=float)
-        else:
-            v = np.array([0, 1, 0], dtype=float)
+        # normal과 거의 평행하지 않은 벡터 하나 선택
+        # if not np.allclose(normal, [1, 0, 0], atol=1e-6):
+        #     tmp = np.array([1, 0, 0], dtype=float)
+        # else:
+        #     tmp = np.array([0, 1, 0], dtype=float)
+        
+        v = np.array([0, 1, 0], dtype=float) if np.allclose(normal, [1, 0, 0]) else np.array([1, 0, 0], dtype=float)
         plane_x = np.cross(normal, v)
         plane_x /= (np.linalg.norm(plane_x) + 1e-8)
     else:
         plane_x = np.array(plane_x, dtype=float)
-        # normal 성분 제거하여 평면에 정사영
+        # plane_x를 normal에 정사영된 성분 제거 → 완전히 평면 위로
         plane_x -= np.dot(plane_x, normal) * normal
         norm_px = np.linalg.norm(plane_x)
         if norm_px < 1e-6:
@@ -216,29 +224,108 @@ def slice_volume_with_plane(volume, plane_center, normal, plane_x=None,
     # 3) plane_y = normal x plane_x
     plane_y = np.cross(normal, plane_x)
     plane_y /= (np.linalg.norm(plane_y) + 1e-8)
-    
-    # 4) 평면 내부 오프셋 적용: 평면 중심 이동
+
+    # 4) plane_center + in_plane_offset
+    pc = np.array(plane_center, dtype=float).copy()
     ox, oy = in_plane_offset
-    plane_center = np.array(plane_center, dtype=float) + ox * plane_x + oy * plane_y
-    
-    # 5) 그리드 생성: 좌표를 np.arange로 생성하여 중심을 (w-1)/2, (h-1)/2로 맞춤.
-    #    이는 update_plane에서 점 좌표 계산시 (np.arange(w) - (w-1)/2)와 동일함.
-    w, h = plane_size  # plane_size는 (width, height)
-    xs = np.arange(w, dtype=float) - (w - 1) / 2.0
-    ys = np.arange(h, dtype=float) - (h - 1) / 2.0
-    grid_x, grid_y = np.meshgrid(xs, ys, indexing='xy')
+    pc = pc + ox * plane_x + oy * plane_y  # 평면 내부 offset
+
+    # 5) 그리드 생성: (width, height)
+    w, h = plane_size
+    xs = np.arange(w, dtype=float) - (w - 1)/2.0  # -127.5 ~ +128.5 (예시)
+    ys = np.arange(h, dtype=float) - (h - 1)/2.0
+    grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
+
+    # 물리적 spacing 적용
     grid_x *= spacing
     grid_y *= spacing
 
-    # 6) 3D 좌표 계산: 평면 상의 각 픽셀에 대해
-    coords0 = plane_center[0] + grid_y * plane_y[0] + grid_x * plane_x[0]
-    coords1 = plane_center[1] + grid_y * plane_y[1] + grid_x * plane_x[1]
-    coords2 = plane_center[2] + grid_y * plane_y[2] + grid_x * plane_x[2]
-    coords = np.array([coords0, coords1, coords2])  # shape: (3, h, w)
+    # 6) 3D coords (z, y, x)
+    coords_z = pc[0] + grid_y * plane_y[0] + grid_x * plane_x[0]
+    coords_y = pc[1] + grid_y * plane_y[1] + grid_x * plane_x[1]
+    coords_x = pc[2] + grid_y * plane_y[2] + grid_x * plane_x[2]
 
-    # 7) 볼륨에서 좌표에 해당하는 값 추출 (1차 선형 보간)
-    slice_img = map_coordinates(volume, coords, order=1, mode='nearest')
-    return slice_img
+    coords = np.array([coords_z, coords_y, coords_x], dtype=float)  # shape=(3, h, w)
+
+    # 7) 슬라이스 추출
+    slice_img = my_map_coordinates(volume, coords, order=order, mode='nearest')
+    # shape=(h, w)
+
+    # 8) 3D 점 좌표. shape=(h, w, 3)
+    slice_points_3d = np.stack([coords_z, coords_y, coords_x], axis=-1)
+
+    # (h,w,3) -> (h*w, 3)
+    slice_points_3d = slice_points_3d.reshape(-1, 3)
+
+    return slice_img, slice_points_3d
+
+
+def my_map_coordinates(volume, coords, order=1, mode='nearest', cval=0.0):
+    """
+    Custom implementation for order=1 (trilinear interpolation) and mode 'nearest'
+    volume: 3D np.ndarray with shape (Z, Y, X)
+    coords: np.ndarray with shape (3, h, w) representing the (z, y, x) coordinates
+            at which to sample the volume.
+    Returns:
+        An array of shape (h, w) with the interpolated values.
+    Only order=1 and mode='nearest' are implemented.
+    """
+    if order != 1:
+        raise NotImplementedError("Only order=1 is implemented.")
+    if mode != 'nearest':
+        raise NotImplementedError("Only mode='nearest' is implemented.")
+    
+    # volume dimensions
+    Z, Y, X = volume.shape
+    h, w = coords.shape[1:]  # output shape
+
+    # Extract fractional coordinate arrays
+    zf = coords[0]  # shape (h, w)
+    yf = coords[1]
+    xf = coords[2]
+    
+    # Compute floor (lower indices) and ceil (upper indices)
+    z0 = np.floor(zf).astype(np.int64)
+    y0 = np.floor(yf).astype(np.int64)
+    x0 = np.floor(xf).astype(np.int64)
+    z1 = z0 + 1
+    y1 = y0 + 1
+    x1 = x0 + 1
+
+    # Clip indices to valid volume bounds (mode 'nearest')
+    z0 = np.clip(z0, 0, Z-1)
+    z1 = np.clip(z1, 0, Z-1)
+    y0 = np.clip(y0, 0, Y-1)
+    y1 = np.clip(y1, 0, Y-1)
+    x0 = np.clip(x0, 0, X-1)
+    x1 = np.clip(x1, 0, X-1)
+
+    # Compute fractional differences
+    dz = zf - z0
+    dy = yf - y0
+    dx = xf - x0
+
+    # Retrieve corner voxel values for each coordinate (shape (h, w))
+    c000 = volume[z0, y0, x0]
+    c001 = volume[z0, y0, x1]
+    c010 = volume[z0, y1, x0]
+    c011 = volume[z0, y1, x1]
+    c100 = volume[z1, y0, x0]
+    c101 = volume[z1, y0, x1]
+    c110 = volume[z1, y1, x0]
+    c111 = volume[z1, y1, x1]
+
+    # Trilinear interpolation
+    c00 = c000 * (1 - dx) + c001 * dx
+    c01 = c010 * (1 - dx) + c011 * dx
+    c10 = c100 * (1 - dx) + c101 * dx
+    c11 = c110 * (1 - dx) + c111 * dx
+
+    c0 = c00 * (1 - dy) + c01 * dy
+    c1 = c10 * (1 - dy) + c11 * dy
+
+    result = c0 * (1 - dz) + c1 * dz
+    return result
 
 
 def rotate_vector(v, axis, angle_deg):
@@ -274,61 +361,38 @@ def update_plane(position, normal):
     
 
     try:
-        # 예: Z축 기준으로 45도 회전된 normal
-        rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
-        # # 1. sliced 생성
-        # sliced = slice_volume_with_plane(volume, position, rotated_normal, plane_size=(256, 256), spacing=1.0)
         
-        spacing = 1.3
-        plane_size = (SHAPE[1], SHAPE[0])
-        in_plane_offset = (0, 0)  # plane 내부에서 x방향 +50, y방향 -50 픽셀 이동
+        # 1) plane 구하기 (기본 normal 또는 rotate_vector로 기울이기)
+        rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
 
-        sliced = slice_volume_with_plane(
-            volume, position, rotated_normal,
+        # 2) slicing + 3D points
+        plane_size = (256, 256)
+        spacing = 1.0
+        sliced, slice_pts_3d = slice_volume_with_plane(
+            volume,
+            plane_center=position,
+            normal=rotated_normal,
+            plane_x=None,
             plane_size=plane_size,
             spacing=spacing,
-            in_plane_offset=in_plane_offset
+            in_plane_offset=(0,0),
+            order=1
         )
-                
-        
-        
-        sliced = np.rot90(sliced, k=3)  # 필요에 따라 k=1 또는 k=3을 사용
-    
+        # (선택) 2D 슬라이스 추가 회전 => 만약 적용하면, 3D 좌표계와는 또 달라짐에 유의
+        # sliced = np.rot90(sliced, k=3)
 
-
-        # 2. plane basis 계산
-        normal = np.array(normal, dtype=float)
-        normal /= np.linalg.norm(normal)
-
-        v = np.array([0, 1, 0], dtype=float) if np.allclose(normal, [1, 0, 0]) else np.array([1, 0, 0], dtype=float)
-        plane_x = np.cross(normal, v)
-        plane_x /= np.linalg.norm(plane_x)
-        plane_y = np.cross(normal, plane_x)
-        plane_y /= np.linalg.norm(plane_y)
-        
-        # 6. Sliced image를 plane 위에 점으로 표시
-        # grid 좌표계 생성 (256x256 기준)
+        # 2) 3D 점 찍기 (동일한 w,h, px, py, plane_center 사용)
         h, w = sliced.shape
         ys, xs = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+        # 중심을 (h-1)/2, (w-1)/2로 맞춤
+        grid_x = (xs - (w - 1)/2).astype(np.float32)
+        grid_y = (ys - (h - 1)/2).astype(np.float32)
+        grid_x *= spacing
+        grid_y *= spacing
 
-        # 중심을 기준으로 offset (-128 ~ +128)
-        # grid_x = (xs - w // 2).astype(np.float32)
-        # grid_y = (ys - h // 2).astype(np.float32)
-        
-        grid_x = (xs - w / 2 + 0.5).astype(np.float32)
-        grid_y = (ys - h / 2 + 0.5).astype(np.float32)      
-
-        # 3D 좌표로 투영
-        plane_points = (
-            position[0] + grid_y * plane_y[0] + grid_x * plane_x[0],
-            position[1] + grid_y * plane_y[1] + grid_x * plane_x[1],
-            position[2] + grid_y * plane_y[2] + grid_x * plane_x[2],
-        )
-
-        points_xyz = np.stack(plane_points, axis=-1).reshape(-1, 3)
-        points_xyz_napari = points_xyz[:, [2, 1, 0]]  # z, y, x → x, y, z
-
-        # intensity를 colormap scalar로 설정
+        # points_xyz_napari = slice_pts_3d[:, [2,1,0]]
+        points_xyz_napari = slice_pts_3d
+      
         colors = sliced.flatten()
 
         if "Sliced Dots" in viewer.layers:
@@ -346,6 +410,79 @@ def update_plane(position, normal):
                 opacity=0.6,
                 blending="additive"
             )
+
+        # # 예: Z축 기준으로 45도 회전된 normal
+        # rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
+        # # # 1. sliced 생성
+        # # sliced = slice_volume_with_plane(volume, position, rotated_normal, plane_size=(256, 256), spacing=1.0)
+        
+        # spacing = 1.3
+        # plane_size = (SHAPE[1], SHAPE[0])
+        # in_plane_offset = (0, 0)  # plane 내부에서 x방향 +50, y방향 -50 픽셀 이동
+
+        # sliced = slice_volume_with_plane(
+        #     volume, position, rotated_normal,
+        #     plane_size=plane_size,
+        #     spacing=spacing,
+        #     in_plane_offset=in_plane_offset
+        # )
+                
+        
+        
+        # sliced = np.rot90(sliced, k=3)  # 필요에 따라 k=1 또는 k=3을 사용
+    
+
+
+        # # 2. plane basis 계산
+        # normal = np.array(normal, dtype=float)
+        # normal /= np.linalg.norm(normal)
+
+        # v = np.array([0, 1, 0], dtype=float) if np.allclose(normal, [1, 0, 0]) else np.array([1, 0, 0], dtype=float)
+        # plane_x = np.cross(normal, v)
+        # plane_x /= np.linalg.norm(plane_x)
+        # plane_y = np.cross(normal, plane_x)
+        # plane_y /= np.linalg.norm(plane_y)
+        
+        # # 6. Sliced image를 plane 위에 점으로 표시
+        # # grid 좌표계 생성 (256x256 기준)
+        # h, w = sliced.shape
+        # ys, xs = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+
+        # # 중심을 기준으로 offset (-128 ~ +128)
+        # # grid_x = (xs - w // 2).astype(np.float32)
+        # # grid_y = (ys - h // 2).astype(np.float32)
+        
+        # grid_x = (xs - w / 2 + 0.5).astype(np.float32)
+        # grid_y = (ys - h / 2 + 0.5).astype(np.float32)      
+
+        # # 3D 좌표로 투영
+        # plane_points = (
+        #     position[0] + grid_y * plane_y[0] + grid_x * plane_x[0],
+        #     position[1] + grid_y * plane_y[1] + grid_x * plane_x[1],
+        #     position[2] + grid_y * plane_y[2] + grid_x * plane_x[2],
+        # )
+
+        # points_xyz = np.stack(plane_points, axis=-1).reshape(-1, 3)
+        # points_xyz_napari = points_xyz[:, [2, 1, 0]]  # z, y, x → x, y, z
+
+        # # intensity를 colormap scalar로 설정
+        # colors = sliced.flatten()
+
+        # if "Sliced Dots" in viewer.layers:
+        #     viewer.layers["Sliced Dots"].data = points_xyz_napari
+        #     viewer.layers["Sliced Dots"].features = {"intensity": colors}
+        #     viewer.layers["Sliced Dots"].face_color = "intensity"
+        # else:
+        #     viewer.add_points(
+        #         points_xyz_napari,
+        #         name="Sliced Dots",
+        #         size=1,
+        #         features={"intensity": colors},
+        #         face_color="intensity",
+        #         edge_width=0,
+        #         opacity=0.6,
+        #         blending="additive"
+        #     )
 
         # # 5. sliced 이미지는 별도 2D window에만 시각화
         # if hasattr(update_plane, "slice_window"):
