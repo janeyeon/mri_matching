@@ -43,7 +43,6 @@ def get_plane_outline(position, plane_x, plane_y, width=SHAPE[0], height=SHAPE[1
     corners += position
     return corners[:, [2, 1, 0]]  # napari: x, y, z → z, y, x
 
-def slice_volume_with_plane(
     # volume, position, normal, plane_size=(256, 256), spacing=1.0
     # ):
     # """
@@ -87,32 +86,118 @@ def slice_volume_with_plane(
     # slice_img = map_coordinates(volume, points, order=1, mode='nearest')
     
 
-    # return slice_img
-        volume: np.ndarray,
-        plane_center: np.ndarray,
-        normal: np.ndarray,
-        plane_x: np.ndarray = None,
-        plane_size: tuple = (256, 256),
-        spacing: float = 1.0,
-        in_plane_offset: tuple = (0.0, 0.0)
-    ):
-    """
-    volume: 3D np.ndarray (Z, Y, X)
-    plane_center: 3D point [z, y, x], 평면의 중앙이 지날 위치
-    normal: plane normal (z, y, x)
-    plane_x: plane 상에서 x축이 될 벡터 (None이면 자동 결정)
-    plane_size: (width, height) in pixels
-    spacing: plane 상의 pixel spacing (확대/축소)
-    in_plane_offset: plane 상에서 (ox, oy)만큼 추가 이동 (픽셀 단위)
-    """
 
-    # 1) normal 정규화
+
+
+# def slice_volume_with_plane(
+
+#     # return slice_img
+#         volume: np.ndarray,
+#         plane_center: np.ndarray,
+#         normal: np.ndarray,
+#         plane_x: np.ndarray = None,
+#         plane_size: tuple = (256, 256),
+#         spacing: float = 1.0,
+#         in_plane_offset: tuple = (0.0, 0.0)
+#     ):
+#     """
+#     volume: 3D np.ndarray (Z, Y, X)
+#     plane_center: 3D point [z, y, x], 평면의 중앙이 지날 위치
+#     normal: plane normal (z, y, x)
+#     plane_x: plane 상에서 x축이 될 벡터 (None이면 자동 결정)
+#     plane_size: (width, height) in pixels
+#     spacing: plane 상의 pixel spacing (확대/축소)
+#     in_plane_offset: plane 상에서 (ox, oy)만큼 추가 이동 (픽셀 단위)
+#     """
+
+#     # 1) normal 정규화
+#     normal = np.array(normal, dtype=float)
+#     normal /= (np.linalg.norm(normal) + 1e-8)
+
+#     # 2) plane_x가 없으면 default 지정
+#     if plane_x is None:
+#         # normal과 거의 평행하지 않은 벡터 하나 고름
+#         if not np.allclose(normal, [1, 0, 0], atol=1e-6):
+#             v = np.array([1, 0, 0], dtype=float)
+#         else:
+#             v = np.array([0, 1, 0], dtype=float)
+#         plane_x = np.cross(normal, v)
+#         plane_x /= (np.linalg.norm(plane_x) + 1e-8)
+#     else:
+#         plane_x = np.array(plane_x, dtype=float)
+#         # 만약 plane_x가 normal과 기울어진 정도가 적으면 보정
+#         plane_x -= np.dot(plane_x, normal) * normal
+#         norm_px = np.linalg.norm(plane_x)
+#         if norm_px < 1e-6:
+#             raise ValueError("plane_x is nearly parallel to normal or zero-length!")
+#         plane_x /= norm_px
+
+#     # 3) plane_y = normal x plane_x
+#     plane_y = np.cross(normal, plane_x)
+#     plane_y /= (np.linalg.norm(plane_y) + 1e-8)
+
+#     # 4) plane 내부에서 오프셋 적용
+#     # plane_center + ox*plane_x + oy*plane_y
+#     ox, oy = in_plane_offset
+#     plane_center = plane_center + ox * plane_x + oy * plane_y
+
+#     # 5) grid (pixel 좌표) 생성
+#     w, h = plane_size
+#     # 가로(width)·세로(height) 순서지만 아래 meshgrid는 (y, x) 형식으로 써줄 것
+#     grid_x, grid_y = np.meshgrid(
+#         np.linspace(-w/2, w/2, w) * spacing,
+#         np.linspace(-h/2, h/2, h) * spacing,
+#         indexing="xy"
+#     )
+#     # shape: (h, w)
+
+#     # 6) 3D coords
+#     # plane_x 방향에 grid_x, plane_y 방향에 grid_y 적용
+#     coords = (
+#         plane_center[0] + grid_y * plane_y[0] + grid_x * plane_x[0],
+#         plane_center[1] + grid_y * plane_y[1] + grid_x * plane_x[1],
+#         plane_center[2] + grid_y * plane_y[2] + grid_x * plane_x[2],
+#     )
+
+#     # 7) slice
+#     slice_img = map_coordinates(volume, coords, order=1, mode='nearest')
+#     return slice_img
+
+
+def slice_volume_with_plane(volume, plane_center, normal, plane_x=None, 
+                              plane_size=(256, 256), spacing=1.0, in_plane_offset=(0.0, 0.0)):
+    """
+    3D volume에서 주어진 평면 상의 2D 단면을 추출하는 함수.
+    
+    Parameters
+    ----------
+    volume : np.ndarray
+        3D 볼륨 (Z, Y, X) 형태.
+    plane_center : array_like
+        평면의 중심 좌표 (z, y, x).
+    normal : array_like
+        평면의 법선 (z, y, x). (정규화되지 않은 벡터도 가능)
+    plane_x : array_like, optional
+        평면 상에서 x축으로 사용할 벡터. None이면 기본값 ([1,0,0] 또는 [0,1,0] 선택)를 사용.
+    plane_size : tuple of int, optional
+        단면 이미지의 (width, height) 픽셀 크기. 기본값 (256, 256).
+    spacing : float, optional
+        픽셀 사이의 물리적 간격 (확대/축소 인자).
+    in_plane_offset : tuple of float, optional
+        평면 내부에서의 (ox, oy) 추가 오프셋 (픽셀 단위).
+    
+    Returns
+    -------
+    slice_img : np.ndarray
+        추출된 2D 단면 이미지 (plane_size와 동일한 shape).
+    """
+    # 1) 법선 정규화
     normal = np.array(normal, dtype=float)
     normal /= (np.linalg.norm(normal) + 1e-8)
-
-    # 2) plane_x가 없으면 default 지정
+    
+    # 2) plane_x 결정 (없으면 기본값 선택)
     if plane_x is None:
-        # normal과 거의 평행하지 않은 벡터 하나 고름
+        # normal과 거의 평행하지 않은 벡터 선택:
         if not np.allclose(normal, [1, 0, 0], atol=1e-6):
             v = np.array([1, 0, 0], dtype=float)
         else:
@@ -121,7 +206,7 @@ def slice_volume_with_plane(
         plane_x /= (np.linalg.norm(plane_x) + 1e-8)
     else:
         plane_x = np.array(plane_x, dtype=float)
-        # 만약 plane_x가 normal과 기울어진 정도가 적으면 보정
+        # normal 성분 제거하여 평면에 정사영
         plane_x -= np.dot(plane_x, normal) * normal
         norm_px = np.linalg.norm(plane_x)
         if norm_px < 1e-6:
@@ -131,31 +216,27 @@ def slice_volume_with_plane(
     # 3) plane_y = normal x plane_x
     plane_y = np.cross(normal, plane_x)
     plane_y /= (np.linalg.norm(plane_y) + 1e-8)
-
-    # 4) plane 내부에서 오프셋 적용
-    # plane_center + ox*plane_x + oy*plane_y
+    
+    # 4) 평면 내부 오프셋 적용: 평면 중심 이동
     ox, oy = in_plane_offset
-    plane_center = plane_center + ox * plane_x + oy * plane_y
+    plane_center = np.array(plane_center, dtype=float) + ox * plane_x + oy * plane_y
+    
+    # 5) 그리드 생성: 좌표를 np.arange로 생성하여 중심을 (w-1)/2, (h-1)/2로 맞춤.
+    #    이는 update_plane에서 점 좌표 계산시 (np.arange(w) - (w-1)/2)와 동일함.
+    w, h = plane_size  # plane_size는 (width, height)
+    xs = np.arange(w, dtype=float) - (w - 1) / 2.0
+    ys = np.arange(h, dtype=float) - (h - 1) / 2.0
+    grid_x, grid_y = np.meshgrid(xs, ys, indexing='xy')
+    grid_x *= spacing
+    grid_y *= spacing
 
-    # 5) grid (pixel 좌표) 생성
-    w, h = plane_size
-    # 가로(width)·세로(height) 순서지만 아래 meshgrid는 (y, x) 형식으로 써줄 것
-    grid_x, grid_y = np.meshgrid(
-        np.linspace(-w/2, w/2, w) * spacing,
-        np.linspace(-h/2, h/2, h) * spacing,
-        indexing="xy"
-    )
-    # shape: (h, w)
+    # 6) 3D 좌표 계산: 평면 상의 각 픽셀에 대해
+    coords0 = plane_center[0] + grid_y * plane_y[0] + grid_x * plane_x[0]
+    coords1 = plane_center[1] + grid_y * plane_y[1] + grid_x * plane_x[1]
+    coords2 = plane_center[2] + grid_y * plane_y[2] + grid_x * plane_x[2]
+    coords = np.array([coords0, coords1, coords2])  # shape: (3, h, w)
 
-    # 6) 3D coords
-    # plane_x 방향에 grid_x, plane_y 방향에 grid_y 적용
-    coords = (
-        plane_center[0] + grid_y * plane_y[0] + grid_x * plane_x[0],
-        plane_center[1] + grid_y * plane_y[1] + grid_x * plane_x[1],
-        plane_center[2] + grid_y * plane_y[2] + grid_x * plane_x[2],
-    )
-
-    # 7) slice
+    # 7) 볼륨에서 좌표에 해당하는 값 추출 (1차 선형 보간)
     slice_img = map_coordinates(volume, coords, order=1, mode='nearest')
     return slice_img
 
