@@ -6,14 +6,46 @@ from magicgui import magicgui
 from qtpy.QtWidgets import QFileDialog, QWidget
 
 import numpy as np
-from scipy.ndimage import map_coordinates
 
-from skimage.measure import marching_cubes
-
-
-
+slice_2d_viewer = None
+sliced_images = []
+sliced_layer_names = []  # 각 sliced 이미지에 대응하는 napari layer 이름
 
 
+from magicgui.widgets import ComboBox
+
+
+
+# ComboBox 위젯 생성
+slice_label_combo = ComboBox(name="slice_label", label="Select Slice")
+slice_label_combo.choices = []  # 빈 리스트로 초기화
+
+@magicgui(call_button="Show Selected Slice")
+def slice_selector_ui(slice_label=slice_label_combo):
+    global slice_2d_viewer
+
+    if len(sliced_images) == 0:
+        print("No slices stored.")
+        return
+
+    selected_label = slice_label.value  # 예: "Sliced Dots 1"
+    if selected_label not in sliced_layer_names:
+        print(f"{selected_label} not found in stored layers")
+        return
+
+    index = sliced_layer_names.index(selected_label)
+    selected_image = sliced_images[index]
+
+    if slice_2d_viewer is None:
+        slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
+        slice_2d_viewer.add_image(selected_image, name="2D Slice", colormap="gray")
+    else:
+        if "2D Slice" in slice_2d_viewer.layers:
+            slice_2d_viewer.layers["2D Slice"].data = selected_image
+        else:
+            slice_2d_viewer.add_image(selected_image, name="2D Slice", colormap="gray")
+
+            
 def load_dicom_series(folder_path):
     files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".dcm")]
     if not files:
@@ -190,7 +222,7 @@ def rotate_vector(v, axis, angle_deg):
     return R @ v
 
 def update_plane(position, normal):
-    global volume
+    global volume, slice_2d_viewer  # 👈 여기에 추가
     if "MRI Volume" not in viewer.layers or volume is None:
         return
 
@@ -240,12 +272,16 @@ def update_plane(position, normal):
                 blending="additive"
             )
 
-        # #! 여기가 별도 2d vis를 키는 창임 동시에 키는 방법 강구해야함 
-        # if hasattr(update_plane, "slice_window"):
-        #     update_plane.slice_window.layers["Slice"].data = sliced
-        # else:
-        #     update_plane.slice_window = napari.Viewer()
-        #     update_plane.slice_window.add_image(sliced, name="Slice", colormap="gray")
+        # === 2D 슬라이스를 별도 viewer로 표시 ===
+        if slice_2d_viewer is None:
+            slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
+            slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
+        else:
+            if "2D Slice" in slice_2d_viewer.layers:
+                slice_2d_viewer.layers["2D Slice"].data = sliced
+            else:
+                slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
+
     except Exception as e:
         print(f"[Custom slice] Failed to compute sliced view: {e}")
 
@@ -265,7 +301,7 @@ def dicom_loader_gui(folder_path: str = PATH):
         viewer.dims.ndisplay = 3
         viewer.add_image(volume, name="MRI Volume", rendering="attenuated_mip")
         center = [volume.shape[0] // 2, volume.shape[1] // 2, volume.shape[2] // 2]
-        update_plane(center, [1, 0, 0], dtype=float)  # 초기 슬라이스
+        update_plane(center, [1, 0, 0])  # 초기 슬라이스
         print(f"Loaded volume from {folder_path}")
     except Exception as e:
         print(f"Error: {e}")
@@ -280,7 +316,7 @@ def plane_controller(
     position_x: float = SHAPE[0] // 2,
     position_y: float = SHAPE[1] // 2,
     position_z: float = SHAPE[2] // 2,
-    normal_x: float = 1.0,
+    normal_x: float = 10.0,
     normal_y: float = 0.0,
     normal_z: float = 0.0,
 ):
@@ -289,11 +325,11 @@ def plane_controller(
         [normal_z, normal_y, normal_x]
     )
     
-slice_count = 0  # 전역으로 선언
+slice_count = 1  # 전역으로 선언
 
 @magicgui(call_button="Select This Slice Plane")
 def select_current_slice_plane():
-    global slice_count, volume
+    global slice_count, volume, sliced_images, sliced_layer_names
     if volume is None or "MRI Volume" not in viewer.layers:
         print("No volume loaded.")
         return
@@ -335,9 +371,35 @@ def select_current_slice_plane():
             opacity=0.6,
             blending="additive"
         )
+        fliped_sliced = np.flipud(sliced)
+
+        # 이미지와 이름 저장
+        sliced_images.append(fliped_sliced)
+        sliced_layer_names.append(layer_name)
+
+        # 드롭다운 업데이트
+        slice_label_combo.choices = sliced_layer_names
+        slice_label_combo.value = layer_name  # 마지막 자동 선
+        
+        
+                
+        # === 2D 슬라이스 표시 ===
+        if slice_2d_viewer is None:
+            slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
+            slice_2d_viewer.add_image(fliped_sliced, name="2D Slice", colormap="gray")
+        else:
+            if "2D Slice" in slice_2d_viewer.layers:
+                slice_2d_viewer.layers["2D Slice"].data = fliped_sliced
+            else:
+                slice_2d_viewer.add_image(fliped_sliced, name="2D Slice", colormap="gray")
+
         print(f"Added new slice layer: {layer_name}")
+        
+  
     except Exception as e:
         print(f"[Select slice] Failed to extract: {e}")
+        
+   
 
 
 # Main
@@ -347,6 +409,8 @@ if __name__ == "__main__":
     viewer.window.add_dock_widget(dicom_loader_gui, area="right")
     viewer.window.add_dock_widget(plane_controller, area="right")
     viewer.window.add_dock_widget(select_current_slice_plane, area="right")
+    viewer.window.add_dock_widget(slice_selector_ui, area="right")
+    viewer.window.add_dock_widget(slice_label_combo, area="right")  # ✅ 이 줄이 필요!
 
     viewer.dims.ndisplay = 3
     napari.run()
