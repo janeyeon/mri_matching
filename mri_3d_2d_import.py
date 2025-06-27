@@ -4,16 +4,48 @@ import pydicom
 import napari
 from magicgui import magicgui
 from qtpy.QtWidgets import QFileDialog, QWidget
-
+from skimage.io import imread
 import numpy as np
 
 slice_2d_viewer = None
 sliced_images = []
 sliced_layer_names = []  # 각 sliced 이미지에 대응하는 napari layer 이름
 
-
+from magicgui import widgets
 from magicgui.widgets import ComboBox
 
+
+@magicgui(call_button="Load External 2D Image")
+def load_external_image():
+    global slice_2d_viewer
+
+    file_path, _ = QFileDialog.getOpenFileName(caption="Select image", filter="Image files (*.png *.jpg *.jpeg *.bmp)")
+    if not file_path:
+        print("No image selected.")
+        return
+
+    try:
+        img = imread(file_path, as_gray=True).astype(np.float32)
+        img -= img.min()
+        img /= (img.max() + 1e-8)
+
+        if slice_2d_viewer is None:
+            slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
+
+        slice_2d_viewer.add_image(
+            img,
+            name="Overlay Image",
+            colormap="magenta",
+            opacity=0.6,
+            blending="translucent_no_depth"
+        )
+
+        print(f"Loaded overlay image: {file_path}")
+
+    except Exception as e:
+        print(f"[Overlay Load Error] {e}")
+        
+        
 
 
 # ComboBox 위젯 생성
@@ -54,16 +86,11 @@ def load_dicom_series(folder_path):
     slices.sort(key=lambda x: float(x.ImagePositionPatient[2]) if "ImagePositionPatient" in x else 0.0)
 
     image_stack = np.stack([s.pixel_array for s in slices]).astype(np.float32)
-    if image_stack.ndim == 4:
-        image_stack = image_stack[0]  
     image_stack -= image_stack.min()
     image_stack /= image_stack.max()
     return image_stack
 
 PATH = "/home/yeon/Documents/2025/MRI-matching/Pancreas_MRI_2023/MRI/Case_01_02_01/dicom"
-# PATH = "/home/yeon/Documents/HY/t1_mprage_sag_5_MR"
-# PATH = "/home/yeon/Documents/HY/gre_6echo_dir1_RL_6_MR"
-
 SHAPE = load_dicom_series(PATH).shape
 
 
@@ -80,7 +107,100 @@ def get_plane_outline(position, plane_x, plane_y, width=SHAPE[0], height=SHAPE[1
     corners += position
     return corners[:, [2, 1, 0]]  # napari: x, y, z → z, y, x
 
+# def setup_transform_ui(viewer_2d):
+#     from napari.utils.transforms import Affine
+#     import math
 
+#     transform_controls = widgets.Container(widgets=[
+#         widgets.FloatSlider(name="translate_x", min=-200, max=200, step=1, value=0),
+#         widgets.FloatSlider(name="translate_y", min=-200, max=200, step=1, value=0),
+#         widgets.FloatSlider(name="rotation", min=-180, max=180, step=1, value=0),
+#         widgets.FloatSlider(name="scale", min=0.1, max=3.0, step=0.01, value=1.0),
+#     ])
+
+#     def apply_transform(*_):
+#         if viewer_2d and "Overlay Image" in viewer_2d.layers:
+#             layer = viewer_2d.layers["Overlay Image"]
+#             tx = transform_controls["translate_x"].value
+#             ty = transform_controls["translate_y"].value
+#             angle = transform_controls["rotation"].value
+#             scale = transform_controls["scale"].value
+
+#             rad = math.radians(angle)
+#             affine = Affine((
+#                 [scale * math.cos(rad), -scale * math.sin(rad), tx],
+#                 [scale * math.sin(rad),  scale * math.cos(rad), ty],
+#                 [0, 0, 1]
+#             ))
+#             layer.transform = affine
+
+#     for widget in transform_controls:
+#         widget.changed.connect(apply_transform)
+
+#     viewer_2d.window.add_dock_widget(transform_controls, area="right")
+
+def setup_transform_ui(viewer_2d):
+    from napari.utils.transforms import Affine
+    import math
+    from skimage.io import imread
+
+    # 🔹 Transform 조절 슬라이더
+    transform_controls = widgets.Container(widgets=[
+        widgets.FloatSlider(name="translate_x", min=-200, max=200, step=1, value=0),
+        widgets.FloatSlider(name="translate_y", min=-200, max=200, step=1, value=0),
+        widgets.FloatSlider(name="rotation", min=-180, max=180, step=1, value=0),
+        widgets.FloatSlider(name="scale", min=0.1, max=3.0, step=0.01, value=1.0),
+    ])
+
+    # 🔹 이미지 불러오기 버튼
+    @magicgui(call_button="Load External 2D Image")
+    def load_external_image():
+        file_path, _ = QFileDialog.getOpenFileName(caption="Select image", filter="Image files (*.png *.jpg *.jpeg *.bmp)")
+        if not file_path:
+            print("No image selected.")
+            return
+
+        try:
+            img = imread(file_path, as_gray=True).astype(np.float32)
+            img -= img.min()
+            img /= (img.max() + 1e-8)
+
+            viewer_2d.add_image(
+                img,
+                name="Overlay Image",
+                colormap="magenta",
+                opacity=0.6,
+                blending="translucent_no_depth"
+            )
+
+            print(f"Loaded overlay image: {file_path}")
+        except Exception as e:
+            print(f"[Overlay Load Error] {e}")
+
+    # 🔹 Transform 적용 함수
+    def apply_transform(*_):
+        if "Overlay Image" in viewer_2d.layers:
+            layer = viewer_2d.layers["Overlay Image"]
+            tx = transform_controls["translate_x"].value
+            ty = transform_controls["translate_y"].value
+            angle = transform_controls["rotation"].value
+            scale = transform_controls["scale"].value
+
+            rad = math.radians(angle)
+            affine = Affine((
+                [scale * math.cos(rad), -scale * math.sin(rad), tx],
+                [scale * math.sin(rad),  scale * math.cos(rad), ty],
+                [0, 0, 1]
+            ))
+            layer.transform = affine
+
+    # 🔹 슬라이더 이벤트 연결
+    for widget in transform_controls:
+        widget.changed.connect(apply_transform)
+
+    # 🔹 모두 2D viewer에 도킹
+    viewer_2d.window.add_dock_widget(load_external_image, area="right")
+    viewer_2d.window.add_dock_widget(transform_controls, area="right")
 
 
 def slice_volume_with_plane(volume, plane_center, normal, plane_x=None, 
@@ -157,13 +277,6 @@ def my_map_coordinates(volume, coords, order=1, mode='nearest', cval=0.0):
         raise NotImplementedError("Only mode='nearest' is implemented.")
     
     # volume dimensions
-    # if len(volume.shape) == 3:
-    #     Z, Y, X = volume.shape
-    # elif len(volume.shape) == 4:
-    #     B, Z, Y, X = volume.shape
-    if len(volume.shape) == 4:
-        volume = volume[0]
-        #! need code for shape 4
     Z, Y, X = volume.shape
     h, w = coords.shape[1:]  # output shape
 
@@ -244,109 +357,59 @@ def update_plane(position, normal):
         "enabled": True
     }
 
-    # try:
-
-    #     # 1) 일단 한번 rot vector로 축을 바꾸고 시작 -> 안그러면 .. 축이 잘 안맞음 ㅠ 
-    #     rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
+    try:
         
-    #     print(rotated_normal.shape)
-    #     # 2) slicing + 3D points
-    #     plane_size = (int(SHAPE[1] *1.2), int(SHAPE[0] * 1.2))
-    #     spacing = 1.0
-    #     sliced, slice_pts_3d = slice_volume_with_plane(
-    #         volume,
-    #         plane_center=position,
-    #         normal=rotated_normal,
-    #         plane_x=None,
-    #         plane_size=plane_size,
-    #         spacing=spacing,
-    #         in_plane_offset=(65,0),
-    #         order=1
-    #     )
+        # 1) 일단 한번 rot vector로 축을 바꾸고 시작 -> 안그러면 .. 축이 잘 안맞음 ㅠ 
+        rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
 
-    #     # points_xyz_napari = slice_pts_3d[:, [2,1,0]]
-    #     points_xyz_napari = slice_pts_3d
-      
-    #     colors = sliced.flatten()
-
-    #     if "Sliced Dots" in viewer.layers:
-    #         viewer.layers["Sliced Dots"].data = points_xyz_napari
-    #         viewer.layers["Sliced Dots"].features = {"intensity": colors}
-    #         viewer.layers["Sliced Dots"].face_color = "intensity"
-    #     else:
-    #         viewer.add_points(
-    #             points_xyz_napari,
-    #             name="Sliced Dots",
-    #             size=1,
-    #             features={"intensity": colors},
-    #             face_color="intensity",
-    #             edge_width=0,
-    #             opacity=0.6,
-    #             blending="additive"
-    #         )
-
-    #     # === 2D 슬라이스를 별도 viewer로 표시 ===
-    #     if slice_2d_viewer is None:
-    #         slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
-    #         slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
-    #     else:
-    #         if "2D Slice" in slice_2d_viewer.layers:
-    #             slice_2d_viewer.layers["2D Slice"].data = sliced
-    #         else:
-    #             slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
-
-    # except Exception as e:
-    #     print(f"[Custom slice] Failed to compute sliced view: {e}")
-    
- 
-    # 1) 일단 한번 rot vector로 축을 바꾸고 시작 -> 안그러면 .. 축이 잘 안맞음 ㅠ 
-    rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
-    
-    print(rotated_normal.shape)
-    # 2) slicing + 3D points
-    plane_size = (int(SHAPE[1] *1.2), int(SHAPE[0] * 1.2))
-    spacing = 1.0
-    sliced, slice_pts_3d = slice_volume_with_plane(
-        volume,
-        plane_center=position,
-        normal=rotated_normal,
-        plane_x=None,
-        plane_size=plane_size,
-        spacing=spacing,
-        in_plane_offset=(65,0),
-        order=1
-    )
-
-    # points_xyz_napari = slice_pts_3d[:, [2,1,0]]
-    points_xyz_napari = slice_pts_3d
-    
-    colors = sliced.flatten()
-
-    if "Sliced Dots" in viewer.layers:
-        viewer.layers["Sliced Dots"].data = points_xyz_napari
-        viewer.layers["Sliced Dots"].features = {"intensity": colors}
-        viewer.layers["Sliced Dots"].face_color = "intensity"
-    else:
-        viewer.add_points(
-            points_xyz_napari,
-            name="Sliced Dots",
-            size=1,
-            features={"intensity": colors},
-            face_color="intensity",
-            edge_width=0,
-            opacity=0.6,
-            blending="additive"
+        # 2) slicing + 3D points
+        plane_size = (int(SHAPE[1] *1.2), int(SHAPE[0] * 1.2))
+        spacing = 1.0
+        sliced, slice_pts_3d = slice_volume_with_plane(
+            volume,
+            plane_center=position,
+            normal=rotated_normal,
+            plane_x=None,
+            plane_size=plane_size,
+            spacing=spacing,
+            in_plane_offset=(65,0),
+            order=1
         )
 
-    # === 2D 슬라이스를 별도 viewer로 표시 ===
-    if slice_2d_viewer is None:
-        slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
-        slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
-    else:
-        if "2D Slice" in slice_2d_viewer.layers:
-            slice_2d_viewer.layers["2D Slice"].data = sliced
+        # points_xyz_napari = slice_pts_3d[:, [2,1,0]]
+        points_xyz_napari = slice_pts_3d
+      
+        colors = sliced.flatten()
+
+        if "Sliced Dots" in viewer.layers:
+            viewer.layers["Sliced Dots"].data = points_xyz_napari
+            viewer.layers["Sliced Dots"].features = {"intensity": colors}
+            viewer.layers["Sliced Dots"].face_color = "intensity"
         else:
+            viewer.add_points(
+                points_xyz_napari,
+                name="Sliced Dots",
+                size=1,
+                features={"intensity": colors},
+                face_color="intensity",
+                edge_width=0,
+                opacity=0.6,
+                blending="additive"
+            )
+
+        # === 2D 슬라이스를 별도 viewer로 표시 ===
+        if slice_2d_viewer is None:
+            slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
             slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
+            setup_transform_ui(slice_2d_viewer)
+        else:
+            if "2D Slice" in slice_2d_viewer.layers:
+                slice_2d_viewer.layers["2D Slice"].data = sliced
+            else:
+                slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
+
+    except Exception as e:
+        print(f"[Custom slice] Failed to compute sliced view: {e}")
 
 
 @magicgui(call_button="Load DICOM Folder")
@@ -475,5 +538,9 @@ if __name__ == "__main__":
     viewer.window.add_dock_widget(slice_selector_ui, area="right")
     viewer.window.add_dock_widget(slice_label_combo, area="right")  # ✅ 이 줄이 필요!
 
+    # if slice_2d_viewer:
+    #     slice_2d_viewer.window.add_dock_widget(transform_controls, area="right")
+    if slice_2d_viewer:
+        setup_transform_ui(slice_2d_viewer)
     viewer.dims.ndisplay = 3
     napari.run()

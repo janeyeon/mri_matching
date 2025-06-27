@@ -14,8 +14,63 @@ sliced_layer_names = []  # 각 sliced 이미지에 대응하는 napari layer 이
 
 from magicgui.widgets import ComboBox
 
+import xml.etree.ElementTree as ET
 
+def load_annotation_points(xml_path, slice_index):
+    """
+    xml_path로부터 3D annotation points를 추출
+    slice_index: Z값 (DICOM slice index, Z 방향)
+    Returns: list of np.array with shape (N, 3), where each array is a polygon (x,y,z)
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    polygons = []
 
+    for annotation in root.findall(".//Annotation"):
+        label_name = annotation.get("Name")
+        for region in annotation.findall(".//Region"):
+            vertices = []
+            for vertex in region.findall(".//Vertex"):
+                x = float(vertex.get("X"))
+                y = float(vertex.get("Y"))
+                z = float(vertex.get("Z")) + slice_index  # Z is usually 0 in 2D annotation; add slice index
+                vertices.append([z, y, x])  # napari uses z, y, x
+            if vertices:
+                polygons.append((label_name, np.array(vertices)))
+    return polygons
+
+from matplotlib import cm
+
+def visualize_annotations_in_3d(polygons, viewer):
+    """
+    주어진 3D annotation polygon들을 napari에 shape layer로 추가
+    polygons: List of (label_name, np.ndarray of shape (N,3))
+    """
+    color_map = {
+        'Tumor': 'red',
+        'GDA': 'blue',
+        'CBD': 'green',
+        'duodenum': 'cyan',
+        'splenic artery': 'magenta',
+        'splenic vein': 'yellow'
+    }
+
+    grouped = {}
+    for label, poly in polygons:
+        grouped.setdefault(label, []).append(poly)
+
+    for label, poly_list in grouped.items():
+        viewer.add_shapes(
+            poly_list,
+            shape_type='polygon',
+            name=f"Anno_{label}",
+            edge_color=color_map.get(label, 'white'),
+            edge_width=1,
+            face_color=color_map.get(label, 'white'),  # 내부 색 추가
+            opacity=0.5,  # 좀 더 낮추면 MRI와 함께 잘 보임
+            blending='translucent'
+        )
+        
 # ComboBox 위젯 생성
 slice_label_combo = ComboBox(name="slice_label", label="Select Slice")
 slice_label_combo.choices = []  # 빈 리스트로 초기화
@@ -63,7 +118,7 @@ def load_dicom_series(folder_path):
 PATH = "/home/yeon/Documents/2025/MRI-matching/Pancreas_MRI_2023/MRI/Case_01_02_01/dicom"
 # PATH = "/home/yeon/Documents/HY/t1_mprage_sag_5_MR"
 # PATH = "/home/yeon/Documents/HY/gre_6echo_dir1_RL_6_MR"
-
+ANNO_PATH="/home/yeon/Documents/2025/MRI-matching/Pancreas_MRI_2023/AI-Bio_MRI_png_xml_20240508/Case_01_02_01"
 SHAPE = load_dicom_series(PATH).shape
 
 
@@ -80,8 +135,39 @@ def get_plane_outline(position, plane_x, plane_y, width=SHAPE[0], height=SHAPE[1
     corners += position
     return corners[:, [2, 1, 0]]  # napari: x, y, z → z, y, x
 
+def load_all_annotations(annotation_folder):
+    """
+    폴더 내 모든 XML annotation을 파싱하여 [(label, vertices), ...] 목록 반환
+    Returns:
+        List of tuples: (label_name, np.ndarray of shape (N, 3)) for each polygon
+    """
+    all_polygons = []
 
+    for filename in os.listdir(annotation_folder):
+        if not filename.endswith(".xml"):
+            continue
 
+        try:
+            slice_id = int(filename.split('_')[-1].split('.')[0])  # e.g., case01_0097.xml → 97
+            xml_path = os.path.join(annotation_folder, filename)
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+
+            for annotation in root.findall(".//Annotation"):
+                label_name = annotation.get("Name")
+                for region in annotation.findall(".//Region"):
+                    vertices = []
+                    for vertex in region.findall(".//Vertex"):
+                        x = float(vertex.get("X"))
+                        y = float(vertex.get("Y"))
+                        z = float(vertex.get("Z")) + slice_id  # 위치 보정
+                        vertices.append([z, y, x])  # napari 좌표계 순서
+                    if vertices:
+                        all_polygons.append((label_name, np.array(vertices)))
+        except Exception as e:
+            print(f"[WARN] Failed to parse {filename}: {e}")
+
+    return all_polygons
 
 def slice_volume_with_plane(volume, plane_center, normal, plane_x=None, 
                               plane_size=(256, 256), spacing=1.0, in_plane_offset=(0.0, 0.0), order=1):
@@ -244,61 +330,7 @@ def update_plane(position, normal):
         "enabled": True
     }
 
-    # try:
-
-    #     # 1) 일단 한번 rot vector로 축을 바꾸고 시작 -> 안그러면 .. 축이 잘 안맞음 ㅠ 
-    #     rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
-        
-    #     print(rotated_normal.shape)
-    #     # 2) slicing + 3D points
-    #     plane_size = (int(SHAPE[1] *1.2), int(SHAPE[0] * 1.2))
-    #     spacing = 1.0
-    #     sliced, slice_pts_3d = slice_volume_with_plane(
-    #         volume,
-    #         plane_center=position,
-    #         normal=rotated_normal,
-    #         plane_x=None,
-    #         plane_size=plane_size,
-    #         spacing=spacing,
-    #         in_plane_offset=(65,0),
-    #         order=1
-    #     )
-
-    #     # points_xyz_napari = slice_pts_3d[:, [2,1,0]]
-    #     points_xyz_napari = slice_pts_3d
-      
-    #     colors = sliced.flatten()
-
-    #     if "Sliced Dots" in viewer.layers:
-    #         viewer.layers["Sliced Dots"].data = points_xyz_napari
-    #         viewer.layers["Sliced Dots"].features = {"intensity": colors}
-    #         viewer.layers["Sliced Dots"].face_color = "intensity"
-    #     else:
-    #         viewer.add_points(
-    #             points_xyz_napari,
-    #             name="Sliced Dots",
-    #             size=1,
-    #             features={"intensity": colors},
-    #             face_color="intensity",
-    #             edge_width=0,
-    #             opacity=0.6,
-    #             blending="additive"
-    #         )
-
-    #     # === 2D 슬라이스를 별도 viewer로 표시 ===
-    #     if slice_2d_viewer is None:
-    #         slice_2d_viewer = napari.Viewer(title="2D Slice Viewer")
-    #         slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
-    #     else:
-    #         if "2D Slice" in slice_2d_viewer.layers:
-    #             slice_2d_viewer.layers["2D Slice"].data = sliced
-    #         else:
-    #             slice_2d_viewer.add_image(sliced, name="2D Slice", colormap="gray")
-
-    # except Exception as e:
-    #     print(f"[Custom slice] Failed to compute sliced view: {e}")
-    
- 
+   
     # 1) 일단 한번 rot vector로 축을 바꾸고 시작 -> 안그러면 .. 축이 잘 안맞음 ㅠ 
     rotated_normal = rotate_vector(normal, axis=[0, 1, 0], angle_deg=90)
     
@@ -366,6 +398,14 @@ def dicom_loader_gui(folder_path: str = PATH):
         center = [volume.shape[0] // 2, volume.shape[1] // 2, volume.shape[2] // 2]
         update_plane(center, [1, 0, 0])  # 초기 슬라이스
         print(f"Loaded volume from {folder_path}")
+
+
+                # === Load Annotations (if exists) ===
+        if os.path.isdir(ANNO_PATH):
+            polygons = load_all_annotations(ANNO_PATH)
+            visualize_annotations_in_3d(polygons, viewer)
+        else:
+            print(f"[INFO] Annotation path {ANNO_PATH} not found or empty")
     except Exception as e:
         print(f"Error: {e}")
 
